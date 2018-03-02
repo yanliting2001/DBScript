@@ -228,8 +228,8 @@ class Movies():
         #     self.kodi_db.add_countries(movieid, item['ProductionLocations'])
         # Process cast
         # print([{"type": "actor", "name": actor} for actor in item['actors']])
-        people = [{"type": "actor", "name": actor['name'], "imageurl": actor['pic']} for actor in item['actors']]
-        people += [{"type": "director", "name": actor['name'], "imageurl": actor['pic']} for name in directors]
+        people = [{"type": "actor", "name": actor['name'], "imageurl": actor.get('pic')} for actor in item['actors']]
+        people += [{"type": "director", "name": listitem['name'], "imageurl": listitem.get('pic')} for listitem in item['directors']]
         self.kodi_db.add_people(movieid, people, "movie")
         # Process genres
         self.kodi_db.add_genres(movieid, genres, "movie")

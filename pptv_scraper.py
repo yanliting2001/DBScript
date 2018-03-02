@@ -2,15 +2,21 @@
 
 import sqlite3
 import urllib
+import urllib2
+import StringIO
+import gzip
+import re
 import requests
+import json
+import datetime
 
 from common import *
 from movies import Movies
 from tvshows import TVShows
 
-KODI_DATABASE_PATH = 'D:\\Program Files (x86)\\Kodi17\\portable_data\\userdata\\Database\\'
+KODI_DATABASE_PATH = 'C:\\Program Files\\Kodi17\\portable_data\\userdata\\Database\\'
 SETTING_IS_INCLUDE_VST = False
-SETTING_PAGE_SIZE = 1000
+SETTING_PAGE_SIZE = 32
 
 
 class PPTVClass(object):
@@ -33,7 +39,11 @@ class PPTVClass(object):
         self.LOCAL_DEBUG = LocalDebug
 
     def get_home_content(self):
-        return requests.get(self.HOMEAPI + 'four/home?version={version}&channel_id={channel_id}&ppi={ppi}'.format(version="4.0.3", channel_id="1110141", ppi=self.PPI)).json()
+        url = self.HOMEAPI + 'four/home?version={version}&channel_id={channel_id}&ppi={ppi}'.format(version="4.0.3", channel_id="1110141", ppi=self.PPI)
+        print "GET HOME CONTENT :%s" % url
+        data = self.get_http_data(url)
+        return json.loads(data)
+        # return requests.get(self.HOMEAPI + 'four/home?version={version}&channel_id={channel_id}&ppi={ppi}'.format(version="4.0.3", channel_id="1110141", ppi=self.PPI)).json()
 
     def get_recommended_config(self):
         return requests.get(self.HOMEAPI + 'rcmdNavConfig?version={version}&channel_id={channel_id}&ppi={ppi}'.format(version="4.0.3", channel_id="1110141", ppi=self.PPI), use_qua=False).json()
@@ -65,7 +75,11 @@ class PPTVClass(object):
         )
         if str_filter:
             url = url + '&' + str_filter
-        return requests.get(url).json()
+        else:
+            url = url + '&all'
+        print "GET CHANNEL LIST :%s" % url
+        data = self.get_http_data(url)
+        return json.loads(data)
 
     def get_video_detail(self, cid):
         url = self.DETAILAPI + \
@@ -88,7 +102,9 @@ class PPTVClass(object):
             gslbversion="2",
             userLevel="0",
             coverPre="sp423")
-        return requests.get(url).json()
+        print "GET VIDEO DETAIL :%s" % url
+        data = self.get_http_data(url)
+        return json.loads(data)
 
     def get_video_relate(self, cid):
         url = self.RELATEAPI + \
@@ -119,15 +135,54 @@ class PPTVClass(object):
     def get_video_topic(self, tid):
         return requests.get(self.TOPICAPI + tid + '?version={version}&channel_id={channel_id}&user_level={user_level}'.format(version="4.0.3", channel_id="200026", user_level="0")).json()
 
+    def get_request_json(self, r):
+        result = None
+        for i in range(0, 2):
+            try:
+                result = r.json()
+            except Exception:
+                print "get request json failed."
+        return result
 
-def item_remap(item):
-    pptv = PPTVClass()
+    def get_http_data(self, url, data=None, cookie=None):
+        for i in range(0, 2):
+            try:
+                req = urllib2.Request(url)
+                req.add_header('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) {0}{1}'.
+                               format('AppleWebKit/537.36 (KHTML, like Gecko) ',
+                                      'Chrome/28.0.1500.71 Safari/537.36'))
+                req.add_header('Accept-encoding', 'gzip')
+                if cookie is not None:
+                    req.add_header('Cookie', cookie)
+                if data:
+                    response = urllib2.urlopen(req, data, timeout=3)
+                else:
+                    response = urllib2.urlopen(req, timeout=3)
+                httpdata = response.read()
+                if response.headers.get('content-encoding', None) == 'gzip':
+                    httpdata = gzip.GzipFile(fileobj=StringIO.StringIO(httpdata)).read()
+                response.close()
+                match = re.compile('encoding=(.+?)"').findall(httpdata)
+                if not match:
+                    match = re.compile('meta charset="(.+?)"').findall(httpdata)
+                if match:
+                    charset = match[0].lower()
+                    if (charset != 'utf-8') and (charset != 'utf8'):
+                        httpdata = unicode(httpdata, charset).encode('utf8')
+                break
+            except Exception:
+                print "get request data failed."
+                httpdata = '{"status": "Fail"}'
+        return httpdata
+
+
+def item_remap(item, detail):
     pptv_id = item['vid']
-    isVST = SETTING_IS_INCLUDE_VST and pptv_id < 0
-    detail = dict() if isVST else pptv.get_video_detail(pptv_id)['v']
     is_tvshows = detail['vt'] == "21" and 'video_list' in detail
     if is_tvshows:  # tvshows
         playlinks = detail['video_list']['playlink2']
+        if isinstance(playlinks, dict):
+            playlinks = [playlinks]
         seasons = []
         kodi_path = "plugin://plugin.proxy.pptv.tvshow/" + str(pptv_id)
         episodes = [{"title": c['_attributes']['title'],
@@ -205,30 +260,116 @@ def setitem_remap(set_item):
     }
 
 
+def recommenditem_remap(item, detail):
+    pptv_id = item['vid']
+    is_tvshows = detail['vt'] == "21" and 'video_list' in detail
+    if is_tvshows:  # tvshows
+        playlinks = detail['video_list']['playlink2']
+        if isinstance(playlinks, dict):
+            playlinks = [playlinks]
+        seasons = []
+        kodi_path = "plugin://plugin.proxy.pptv.tvshow/" + str(pptv_id)
+        episodes = [{"title": c['_attributes']['title'],
+                    "episode_id": c['_attributes']['id'],
+                    "pic": c['_attributes']['sloturl'],
+                    "show_id": pptv_id,
+                    "file": kodi_path + "?" + urllib.urlencode({'playvid': c['_attributes']['id']}),
+                    "path": kodi_path} for c in playlinks]
+    return {
+        "title": item.get('title'),
+        "dateadded": item.get('updatetime'),
+        "writer": '',
+        "director": ' / '.join(detail.get('director').split(',')),
+        "directors": detail.get("directors"),
+        "actors": detail.get('actors'),
+        "genres": detail.get('catalog').split(','),
+        "genre": ' / '.join(detail.get('catalog').split(',')),
+        "tags": item['tags'].split(','),
+        "plot": detail.get('content'),
+        "tagline": '',
+        "rating": detail.get('douBanScore'),
+        "year": detail.get('year'),
+        "runtime": detail.get('durationSecond'),
+        "country": detail.get('area'),
+        "studio": '',
+        "sorttitle": get_sorttitle(item.get('title')),
+        "shortplot": item.get('subTitle'),
+        "trailer": '',
+        "mpaa": '',
+        "source_type": 'VST' if isVST else "pptv",
+        "source_id": item['uuid'] if isVST else pptv_id,
+        "id": item['uuid'] if isVST else pptv_id,
+        "playurl": "plugin://plugin.proxy.pptv.movies/play/vst" + str(pptv_id),
+        "path": "plugin://plugin.proxy.pptv.movies/",
+        "artwork": {
+            "poster": detail['imgurl'],
+            "fanart": item['fanart']
+        },
+        "seasons": seasons if is_tvshows else [],
+        "episodes": episodes if is_tvshows else []
+    }
+
+
+def get_homecontent_list(pptv):
+    result = {}
+    listitems = []
+    count = 0
+    data = pptv.get_home_content()
+    if 'data' not in data:
+        return None
+    for content in data['data']:
+        if 'list' not in content:
+            continue
+        for listitem in content['list']:
+            if 'item' not in listitem:
+                continue
+            for item in listitem['item']:
+                if item['vt'] in ['3', '21', '22'] and item['layout_type'] != "4" and item['jump_params'] is None:
+                    item['tags'] = listitem['name']
+                    item['vid'] = item['content_id']
+                    item['imgurl'] = ""
+                    item['fanart'] = item['cover_img']
+                    item['vt'] = int(item['vt'])
+                    item['subTitle'] = item['subtitle']
+                    item['uuid'] = ""
+                    listitems.append(item)
+                    count += 1
+    result['videos'] = listitems
+    result['page_count'] = 1
+    result['page'] = 1
+    result['count'] = count
+    result['countInPage'] = count
+    return result
+
+
 if __name__ == "__main__":
+    starttime = datetime.datetime.now()
+
     with sqlite3.connect(KODI_DATABASE_PATH + "MyVideos107.db", 120) as kodi_conn,\
             sqlite3.connect(KODI_DATABASE_PATH + "pptv.db", 120) as pp_conn:
         cursor = kodi_conn.cursor()
         pptv_cursor = pp_conn.cursor()
-        # mo = Movies(cursor, pptv_cursor)
+        mo = Movies(cursor, pptv_cursor)
         tv = TVShows(cursor, pptv_cursor)
         pptv = PPTVClass()
         try:
+            count = 0
             skip = 0
             # mo.update_artist_artwork()
-            s = pptv.get_channel_list(2, pn=1, ps=SETTING_PAGE_SIZE)
+            # s = pptv.get_channel_list(2, pn=53, ps=SETTING_PAGE_SIZE)
+            s = get_homecontent_list(pptv)
             total_count = s['count']
             page_count = s['page_count']
             movie_list = s['videos']
 
-            for page_num in range(2, page_count + 1):
-                data = pptv.get_channel_list(2, pn=page_num, ps=SETTING_PAGE_SIZE)
-                movie_list += data["videos"]
+            # for page_num in range(54, page_count + 1):
+            #     data = pptv.get_channel_list(2, pn=page_num, ps=SETTING_PAGE_SIZE)
+            #     movie_list += data["videos"]
 
             for index, item in enumerate(movie_list):
                 print_progress(item['title'].encode("gbk"), index + 1, total_count, "Working: ")
                 if item['vt'] == 22:  # movie set
-                    continue
+                    # continue
                     set_detail = pptv.get_video_detail(item['vid'])['v']
                     if "video_list" not in set_detail:
                         skip += 1
@@ -239,19 +380,33 @@ if __name__ == "__main__":
                     boxset = {
                         "name": item["title"],
                         "id": item['vid'],
-                        "artwork": {"poster": item['imgurl']},
+                        "artwork": {"poster": item['imgurl'], "fanart": item['fanart']},
                         "items": map(setitem_remap, movielist)
                     }
                     map(mo.add_update, boxset['items'])  # add the movie list to movie db
-                    tv.add_updateBoxset(boxset)
+                    mo.add_updateBoxset(boxset)
                     continue
-                tv.add_update(item_remap(item))
+
+                pptv_id = item['vid']
+                isVST = SETTING_IS_INCLUDE_VST and pptv_id < 0
+                detail = pptv.get_video_detail(pptv_id)
+                if "v" not in detail:
+                    skip += 1
+                    continue
+                if item['vt'] == 3:
+                    mo.add_update(recommenditem_remap(item, detail['v']))
+                elif item['vt'] == 21:
+                    tv.add_update(recommenditem_remap(item, detail['v']))
+                count = index
             print("skip : " + str(skip))
         except Exception as e:
             import traceback
             traceback.print_exc()
-            set_progress(index)
+            set_progress(count)
         else:
             clear_progress()
         pp_conn.commit()
         kodi_conn.commit()
+
+    endtime = datetime.datetime.now()
+    print("totaltime : " + str(endtime - starttime))
